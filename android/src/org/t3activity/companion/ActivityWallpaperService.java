@@ -38,7 +38,7 @@ public class ActivityWallpaperService extends WallpaperService {
             super.onCreate(holder);
             setOffsetNotificationsEnabled(false);
             ActivityFeed.listeners.add(feedChanged);
-            worker.scheduleWithFixedDelay(this::fetch, 0, 15, TimeUnit.SECONDS);
+            worker.scheduleWithFixedDelay(this::fetch, 0, 4, TimeUnit.SECONDS);
         }
         @Override public void onSurfaceChanged(SurfaceHolder holder, int format, int width, int height) {
             surfaceWidth = width; surfaceHeight = height; surfaceReady = true; lastDraw = null; draw();
@@ -59,11 +59,11 @@ public class ActivityWallpaperService extends WallpaperService {
         }
         private void fetch() {
             if (!visible || ActivityFeed.monitoring || !enabled()) return;
-            JSONObject data = null;
-            try { data = ActivityFeed.read(ActivityWallpaperService.this); } catch (Exception ignored) { }
-            JSONObject result = data;
+            ActivityFeed.Response data = null;
+            try { data = new ActivityFeed.Client(ActivityWallpaperService.this).read(null); } catch (Exception ignored) { }
+            ActivityFeed.Response result = data;
             main.post(() -> {
-                if (!destroyed && visible && !ActivityFeed.monitoring && enabled()) ActivityFeed.publish(result);
+                if (!destroyed && visible && !ActivityFeed.monitoring && enabled()) ActivityFeed.publish(result == null ? null : result.data, result == null ? 0 : result.ageMs);
             });
         }
         private boolean enabled() {
@@ -85,14 +85,13 @@ public class ActivityWallpaperService extends WallpaperService {
             if (!surfaceReady || destroyed || surfaceWidth <= 0 || surfaceHeight <= 0) return;
             reloadImage();
             boolean lock = lockSurface() && enabled();
-            boolean fresh = ActivityFeed.refreshed > 0 && System.currentTimeMillis() - ActivityFeed.refreshed < 45_000;
-            JSONObject data = fresh ? ActivityFeed.snapshot : null;
+            JSONObject data = ActivityFeed.current();
             int count = data == null ? 0 : data.optInt("count");
             JSONArray rows = data == null ? new JSONArray() : data.optJSONArray("rows");
             if (rows == null) rows = new JSONArray();
             int total = data == null ? 0 : data.optInt("total", Math.max(count, rows.length()));
-            String state = data == null ? (fresh ? "Disconnected" : "Connecting") : ActivityCard.summary(count, rows);
-            String key = lock + "|" + state + "|" + rows + "|" + surfaceWidth + "x" + surfaceHeight;
+            String state = ActivityFeed.status(count, rows);
+            String key = lock + "|" + state + "|" + rows + "|" + total + "|" + surfaceWidth + "x" + surfaceHeight;
             if (key.equals(lastDraw)) return;
             SurfaceHolder holder = getSurfaceHolder();
             Canvas canvas = null;

@@ -2,6 +2,9 @@ package org.t3activity.companion;
 
 import android.app.*;
 import android.content.Intent;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
 import android.os.*;
 import android.graphics.Typeface;
@@ -15,7 +18,11 @@ public class ActivityService extends Service {
     private static final int ID = 42;
     private static final String CHANNEL = "agent_activity";
     private static final String GLASS_CHANNEL = "glass_monitor";
-    private ScheduledExecutorService worker;
+    private ExecutorService worker, wakeWorker;
+    private boolean wakeInFlight;
+    private final BroadcastReceiver screenOn = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) { refreshAfterWake(); }
+    };
     private String last;
     private boolean stopped;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -31,21 +38,71 @@ public class ActivityService extends Service {
         manager.createNotificationChannel(glass);
         ActivityFeed.monitoring = true;
         startForeground(ID, card("Connecting", "Waiting for your Mac", new JSONArray(), 0, 0, ActivityCard.mode(this)), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-        worker = Executors.newSingleThreadScheduledExecutor();
-        worker.scheduleWithFixedDelay(this::refresh, 0, 15, TimeUnit.SECONDS);
+        worker = Executors.newSingleThreadExecutor();
+        worker.execute(this::refreshLoop);
+        wakeWorker = Executors.newSingleThreadExecutor();
+        registerReceiver(screenOn, new IntentFilter(Intent.ACTION_SCREEN_ON), Context.RECEIVER_NOT_EXPORTED);
         return START_STICKY;
     }
-    private void refresh() {
-        try {
-            JSONObject snapshot = ActivityFeed.read(this);
-            int count = snapshot.getInt("count");
-            JSONArray rows = snapshot.getJSONArray("rows");
-            main.post(() -> { if (!stopped) ActivityFeed.publish(snapshot); });
-            publish(ActivityCard.summary(count, rows), rows.length() == 0 ? "No active agents" : "", rows, count, snapshot.optInt("total", Math.max(count, rows.length())));
-        } catch (Exception e) {
-            main.post(() -> { if (!stopped) ActivityFeed.publish(null); });
-            publish("Disconnected", "Waiting for a connection to your Mac", new JSONArray(), 0, 0);
+    private void refreshLoop() {
+        ActivityFeed.Client client = null;
+        String revision = null;
+        int retryMs = 1000;
+        while (!Thread.currentThread().isInterrupted()) {
+            try {
+                if (client == null) client = new ActivityFeed.Client(this);
+                long requestStarted = SystemClock.elapsedRealtime();
+                ActivityFeed.Response response = client.read(revision);
+                android.util.Log.d("T3Activity", (java.util.Objects.equals(revision, response.revision) ? "heartbeat " : "update ")
+                        + (SystemClock.elapsedRealtime() - requestStarted) + "ms");
+                revision = response.revision;
+                retryMs = 1000;
+                main.post(() -> deliver(response.data, response.ageMs));
+                // Older bridges do not support the change stream; avoid a tight loop.
+                if (revision == null) Thread.sleep(3000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (Exception e) {
+                android.util.Log.w("T3Activity", "Reconnecting: " + e.getClass().getSimpleName());
+                main.post(() -> deliver(null, 0));
+                client = null; revision = null;
+                try { Thread.sleep(retryMs); }
+                catch (InterruptedException stop) { Thread.currentThread().interrupt(); return; }
+                retryMs = Math.min(8000, retryMs * 2);
+            }
         }
+    }
+    // A sleeping phone can retain a suspended socket. Fetch immediately on wake
+    // instead of waiting for that older request to time out.
+    private void refreshAfterWake() {
+        if (stopped || wakeInFlight || !ActivityFeed.needsRefresh()) return;
+        wakeInFlight = true;
+        wakeWorker.execute(() -> {
+            ActivityFeed.Response response = null;
+            try { response = new ActivityFeed.Client(this).read(null); }
+            catch (Exception ignored) { }
+            ActivityFeed.Response result = response;
+            main.post(() -> {
+                wakeInFlight = false;
+                if (!stopped && result != null && ActivityFeed.needsRefresh()) {
+                    android.util.Log.d("T3Activity", "Recovered on screen wake");
+                    deliver(result.data, result.ageMs);
+                }
+            });
+        });
+    }
+    private void deliver(JSONObject data, long ageMs) {
+        if (stopped) return;
+        ActivityFeed.publish(data, ageMs);
+        JSONObject current = ActivityFeed.current();
+        int count = current == null ? 0 : current.optInt("count");
+        JSONArray rows = current == null ? new JSONArray() : current.optJSONArray("rows");
+        if (rows == null) rows = new JSONArray();
+        int total = current == null ? 0 : current.optInt("total", Math.max(count, rows.length()));
+        String title = ActivityFeed.status(count, rows);
+        String empty = current == null ? "Waiting for a connection to your Mac" : "No active agents";
+        publish(title, empty, rows, count, total);
     }
     private CharSequence nativeBody(String empty, JSONArray rows, int count) {
         if (rows.length() == 0) return empty;
@@ -82,15 +139,12 @@ public class ActivityService extends Service {
         return lines;
     }
     private void publish(String title, String empty, JSONArray rows, int count, int total) {
-        main.post(() -> {
-            if (stopped) return;
-            String mode = ActivityCard.mode(this);
-            ActivityWidget.update(this, title, empty, rows, total);
-            String key = mode + "\n" + title + "\n" + empty + rows;
-            if (key.equals(last)) return;
-            last = key;
-            getSystemService(NotificationManager.class).notify(ID, card(title, empty, rows, count, total, mode));
-        });
+        String mode = ActivityCard.mode(this);
+        String key = mode + "\n" + title + "\n" + empty + rows + total;
+        if (key.equals(last)) return;
+        last = key;
+        ActivityWidget.update(this, title, empty, rows, total);
+        getSystemService(NotificationManager.class).notify(ID, card(title, empty, rows, count, total, mode));
     }
     private Notification card(String title, String empty, JSONArray rows, int count, int total, String mode) {
         PendingIntent stop = PendingIntent.getService(this, 1, new Intent(this, ActivityService.class).setAction("stop"), PendingIntent.FLAG_IMMUTABLE);
@@ -124,8 +178,12 @@ public class ActivityService extends Service {
     @Override public void onDestroy() {
         stopped = true;
         ActivityFeed.monitoring = false;
-        ActivityFeed.publish(null);
-        if (worker != null) worker.shutdownNow();
+        ActivityFeed.clear();
+        if (worker != null) {
+            unregisterReceiver(screenOn);
+            worker.shutdownNow();
+            wakeWorker.shutdownNow();
+        }
         ActivityWidget.update(this, "Agent activity", "Updates stopped", new JSONArray(), 0);
         stopForeground(STOP_FOREGROUND_REMOVE);
         super.onDestroy();

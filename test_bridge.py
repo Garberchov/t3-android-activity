@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from bridge import snapshot
+from bridge import snapshot, SnapshotReader
 
 
 class SnapshotTests(unittest.TestCase):
@@ -57,5 +57,15 @@ class SnapshotTests(unittest.TestCase):
             with sqlite3.connect(db) as con:
                 con.execute("DELETE FROM orchestration_v2_projection_runs WHERE thread_id = 'Failed'")
             self.assertEqual(snapshot(db)['rows'][-1]['status'], 'Done')
+            reader = SnapshotReader(db)
+            try:
+                self.assertEqual(reader()['count'], 7)
+                unchanged = reader()
+                self.assertIs(reader(), unchanged)
+                with sqlite3.connect(db) as con:
+                    con.execute("UPDATE orchestration_v2_projection_runs SET status='completed', completed_at=? WHERE thread_id='Busy 0'", (stamp(now),))
+                self.assertEqual(reader()['count'], 6)
+            finally:
+                reader.close()
 
 if __name__ == '__main__': unittest.main()

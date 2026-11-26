@@ -1,5 +1,6 @@
 """Read-only local T3 agent activity endpoint for the paired phone."""
-from contextlib import closing
+from contextlib import closing, nullcontext
+import hashlib
 import hmac
 import json
 import sqlite3
@@ -13,10 +14,10 @@ STATE = Path.home() / 'Library/Application Support/T3AndroidActivity'
 DB = Path.home() / '.t3/userdata/statev2.sqlite'
 
 
-def snapshot(db=DB):
+def snapshot(db=DB, connection=None):
     # Match T3's visible root threads, keep awaiting background work, and retain
     # unsettled completion results for the same 15-minute window as its iOS card.
-    with closing(sqlite3.connect(db.as_uri() + '?mode=ro', uri=True, timeout=2)) as con:
+    with (closing(sqlite3.connect(db.as_uri() + '?mode=ro', uri=True, timeout=2)) if connection is None else nullcontext(connection)) as con:
         rows = con.execute('''
             WITH live AS MATERIALIZED (
                 SELECT COALESCE(json_extract(t.payload_json, '$.lineage.rootThreadId'), t.thread_id) AS root_id,
@@ -95,22 +96,124 @@ def snapshot(db=DB):
     }
 
 
+class SnapshotReader:
+    """Keep a read-only SQLite page cache warm; skip unchanged database revisions."""
+
+    def __init__(self, db=DB):
+        self.db = db
+        self.connection = None
+        self.identity = self.version = self.data = None
+        self.last_read = 0
+
+    def close(self):
+        if self.connection is not None:
+            self.connection.close()
+            self.connection = None
+        self.version = self.data = None
+        self.last_read = 0
+
+    def __call__(self):
+        stat = self.db.stat()
+        identity = (stat.st_dev, stat.st_ino)
+        if self.connection is None or identity != self.identity:
+            self.close()
+            self.connection = sqlite3.connect(self.db.as_uri() + '?mode=ro', uri=True, timeout=2)
+            self.connection.execute('PRAGMA query_only = ON')
+            self.connection.execute('PRAGMA cache_size = -16384')
+            self.identity = identity
+        try:
+            version = self.connection.execute('PRAGMA data_version').fetchone()[0]
+            # Periodic reads also expire recently completed threads without new DB writes.
+            if self.data is None or version != self.version or time.monotonic() - self.last_read >= 5:
+                self.data = snapshot(self.db, self.connection)
+                self.version = version
+                self.last_read = time.monotonic()
+            return self.data
+        except sqlite3.Error:
+            self.close()
+            raise
+
+
+class ActivityCache:
+    """Refresh independently of HTTP so slow database reads never block a fresh response."""
+
+    def __init__(self, reader, interval=2, wait=8, max_age=12, initial_wait=15):
+        self.reader = reader
+        self.interval, self.wait, self.max_age = interval, wait, max_age
+        self.initial_wait = max(wait, initial_wait)
+        self.condition = threading.Condition()
+        self.body = self.revision = None
+        self.refreshed = self.demand = 0
+        self.closed = False
+        self.worker = threading.Thread(target=self.refresh, daemon=True)
+        self.worker.start()
+
+    def refresh(self):
+        try:
+            self.refresh_loop()
+        finally:
+            if hasattr(self.reader, 'close'):
+                self.reader.close()
+
+    def refresh_loop(self):
+        while True:
+            with self.condition:
+                while not self.closed and time.monotonic() - self.demand > 30:
+                    self.condition.wait()
+                if self.closed:
+                    return
+            try:
+                data = json.dumps(self.reader(), ensure_ascii=False).encode()
+                revision = hashlib.sha256(data).hexdigest()
+            except (sqlite3.Error, OSError):
+                pass
+            else:
+                with self.condition:
+                    self.body, self.revision = data, revision
+                    self.refreshed = time.monotonic()
+                    self.condition.notify_all()
+            with self.condition:
+                self.condition.wait_for(lambda: self.closed, timeout=self.interval)
+                if self.closed:
+                    return
+
+    def read(self, since=None, allow_stale=False):
+        with self.condition:
+            self.demand = time.monotonic()
+            self.condition.notify_all()
+            initial = self.body is None or self.demand - self.refreshed > self.max_age
+            deadline = self.demand + (self.initial_wait if initial else self.wait)
+            while not self.closed:
+                now = time.monotonic()
+                age = now - self.refreshed
+                fresh = self.body is not None and age <= self.max_age
+                if fresh and (since != self.revision or now >= deadline):
+                    return self.body, self.revision, int(age * 1000)
+                if now >= deadline:
+                    # A new client understands source age and can show "Syncing"
+                    # instead of mistaking a slow SQLite read for a lost connection.
+                    if allow_stale and self.body is not None and age <= 30:
+                        return self.body, self.revision, int(age * 1000)
+                    break
+                self.condition.wait(deadline - now)
+            raise sqlite3.OperationalError('Activity feed unavailable')
+
+    def close(self):
+        with self.condition:
+            self.closed = True
+            self.condition.notify_all()
+
+
 class Server(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, handler):
+    def __init__(self, address, handler, reader=None, **cache_options):
         super().__init__(address, handler)
-        self.snapshot_lock = threading.Lock()
-        self.cached = None
-        self.cached_at = 0
+        self.cache = ActivityCache(reader or SnapshotReader(), **cache_options)
 
-    def activity(self):
-        with self.snapshot_lock:
-            now = time.monotonic()
-            if self.cached is None or now - self.cached_at >= 8:
-                self.cached = snapshot()
-                self.cached_at = time.monotonic()
-            return self.cached
+    def server_close(self):
+        self.cache.close()
+        super().server_close()
 
     def process_request_thread(self, request, client_address):
         # A stalled client's TLS handshake must not block the listener.
@@ -128,23 +231,29 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if not hmac.compare_digest(self.headers.get('Authorization', ''), self.server.authorization):
+        if not hmac.compare_digest(self.headers.get('Authorization', '').encode(), self.server.authorization.encode()):
             self.send_error(401)
             return
         if self.path != '/activity':
             self.send_error(404)
             return
         try:
-            data = json.dumps(self.server.activity(), ensure_ascii=False).encode()
+            data, revision, age_ms = self.server.cache.read(
+                self.headers.get('X-T3-Revision'), self.headers.get('X-T3-Feed-Version') == '2')
         except sqlite3.Error:
             self.send_error(503)
             return
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-T3-Revision', revision)
+        self.send_header('X-T3-Age-Ms', str(age_ms))
         self.send_header('Content-Length', str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except OSError:
+            pass  # Client changed networks or closed the request.
 
 
 if __name__ == '__main__':

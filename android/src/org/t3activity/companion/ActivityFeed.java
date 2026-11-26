@@ -1,6 +1,7 @@
 package org.t3activity.companion;
 
 import android.content.Context;
+import android.os.SystemClock;
 import android.util.AtomicFile;
 import org.json.JSONObject;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -14,16 +15,41 @@ import javax.net.ssl.*;
 
 final class ActivityFeed {
     static volatile boolean monitoring;
-    static JSONObject snapshot;
-    static long refreshed;
+    private static JSONObject snapshot;
+    private static long refreshed;
+    static boolean connected, attempted;
     static final CopyOnWriteArrayList<Runnable> listeners = new CopyOnWriteArrayList<>();
-    static final int MAX_PAIR_BYTES = 32 * 1024;
+    private static final long MAX_AGE = 30_000;
 
-    static void publish(JSONObject data) {
-        snapshot = data;
-        refreshed = System.currentTimeMillis();
+    // Retain the last snapshot briefly on a transient outage, but explicitly mark it stale.
+    static void publish(JSONObject data) { publish(data, 0); }
+    static void publish(JSONObject data, long ageMs) {
+        attempted = true;
+        connected = data != null;
+        if (data != null) {
+            snapshot = data;
+            refreshed = SystemClock.elapsedRealtime() - Math.min(Math.max(0, ageMs), MAX_AGE + 1);
+        }
         for (Runnable listener : listeners) listener.run();
     }
+    static JSONObject current() {
+        return snapshot != null && SystemClock.elapsedRealtime() - refreshed < MAX_AGE ? snapshot : null;
+    }
+    static boolean needsRefresh() {
+        return !connected || current() == null || SystemClock.elapsedRealtime() - refreshed > 8_000;
+    }
+    static void clear() {
+        snapshot = null; refreshed = 0; connected = false; attempted = false;
+        for (Runnable listener : listeners) listener.run();
+    }
+    static String status(int count, org.json.JSONArray rows) {
+        if (!attempted) return "Connecting";
+        if (!connected) return current() == null ? "Disconnected" : "Reconnecting…";
+        if (current() == null || SystemClock.elapsedRealtime() - refreshed > 8_000) return "Syncing…";
+        return ActivityCard.summary(count, rows);
+    }
+
+    static final int MAX_PAIR_BYTES = 32 * 1024;
 
     static byte[] boundedRead(InputStream stream, int limit) throws IOException {
         byte[] data = stream.readNBytes(limit + 1);
@@ -68,22 +94,53 @@ final class ActivityFeed {
         }
     }
 
-    static JSONObject read(Context context) throws Exception {
-        JSONObject config;
-        try (InputStream stream = pairingFile(context).openRead()) {
-            config = validate(boundedRead(stream, MAX_PAIR_BYTES));
+    static final class Response {
+        final JSONObject data;
+        final String revision;
+        final long ageMs;
+        Response(JSONObject data, String revision, long ageMs) {
+            this.data = data; this.revision = revision; this.ageMs = ageMs;
         }
-        KeyStore trust = KeyStore.getInstance(KeyStore.getDefaultType()); trust.load(null, null);
-        trust.setCertificateEntry("paired-mac", certificate(config));
-        TrustManagerFactory tm = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()); tm.init(trust);
-        SSLContext tls = SSLContext.getInstance("TLS"); tls.init(null, tm.getTrustManagers(), null);
-        HttpsURLConnection connection = (HttpsURLConnection) new URL(config.getString("url")).openConnection();
-        connection.setSSLSocketFactory(tls.getSocketFactory());
-        connection.setInstanceFollowRedirects(false);
-        connection.setRequestProperty("Authorization", "Bearer " + config.getString("token"));
-        connection.setConnectTimeout(5000); connection.setReadTimeout(12000);
-        try (InputStream stream = connection.getInputStream()) {
-            return new JSONObject(new String(boundedRead(stream, 128 * 1024), StandardCharsets.UTF_8));
-        } finally { connection.disconnect(); }
     }
+
+    // Reuse the certificate and TLS context across change requests.
+    static final class Client {
+        private final URL url;
+        private final String authorization;
+        private final SSLSocketFactory socketFactory;
+        Client(Context context) throws Exception {
+            JSONObject config;
+            try (InputStream stream = pairingFile(context).openRead()) {
+                config = validate(boundedRead(stream, MAX_PAIR_BYTES));
+            }
+            url = new URL(config.getString("url"));
+            authorization = "Bearer " + config.getString("token");
+            KeyStore trust = KeyStore.getInstance(KeyStore.getDefaultType()); trust.load(null, null);
+            trust.setCertificateEntry("paired-mac", certificate(config));
+            TrustManagerFactory tm = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()); tm.init(trust);
+            SSLContext tls = SSLContext.getInstance("TLS"); tls.init(null, tm.getTrustManagers(), null);
+            socketFactory = tls.getSocketFactory();
+        }
+        Response read(String since) throws Exception {
+            HttpsURLConnection connection = (HttpsURLConnection) url.openConnection();
+            connection.setSSLSocketFactory(socketFactory);
+            connection.setInstanceFollowRedirects(false);
+            connection.setRequestProperty("Authorization", authorization);
+            connection.setRequestProperty("X-T3-Feed-Version", "2");
+            if (since != null) connection.setRequestProperty("X-T3-Revision", since);
+            connection.setConnectTimeout(5000); connection.setReadTimeout(18000);
+            try {
+                int code = connection.getResponseCode();
+                if (code != 200) throw new java.io.IOException("HTTP " + code);
+                try (InputStream stream = connection.getInputStream()) {
+                    JSONObject data = new JSONObject(new String(boundedRead(stream, 128 * 1024), StandardCharsets.UTF_8));
+                    data.getInt("count"); data.getJSONArray("rows");
+                    String age = connection.getHeaderField("X-T3-Age-Ms");
+                    return new Response(data, connection.getHeaderField("X-T3-Revision"), age == null ? 0 : Long.parseLong(age));
+                }
+            } finally { connection.disconnect(); }
+        }
+    }
+
+    static JSONObject read(Context context) throws Exception { return new Client(context).read(null).data; }
 }

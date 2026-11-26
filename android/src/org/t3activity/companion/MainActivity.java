@@ -49,7 +49,7 @@ public class MainActivity extends Activity {
         button("Stop updates", () -> {
             deleteFile("monitoring.enabled");
             stopService(new Intent(this, ActivityService.class));
-            ActivityFeed.publish(null);
+            ActivityFeed.clear();
             status.setText("Updates stopped.");
         });
         button("Open T3 Code", () -> {
@@ -81,6 +81,9 @@ public class MainActivity extends Activity {
         if (request == PAIR) {
             try (InputStream stream = getContentResolver().openInputStream(intent.getData())) {
                 ActivityFeed.pair(this, stream);
+                deleteFile("monitoring.enabled");
+                stopService(new Intent(this, ActivityService.class));
+                ActivityFeed.clear();
                 showPairing();
             } catch (Exception e) { status.setText("Could not import pairing. Select the pairing.json from Mac setup."); }
         } else if (request == PHOTO) {

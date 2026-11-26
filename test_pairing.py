@@ -6,7 +6,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
-from unittest.mock import patch
+import time
 
 from bridge import Handler, Server
 from setup_mac import create_pairing, private_ipv4
@@ -20,7 +20,8 @@ class PairingTests(unittest.TestCase):
                 private_ipv4(address)
 
     def test_authenticated_tls_and_rotation(self):
-        with tempfile.TemporaryDirectory() as temp, Server(('127.0.0.1', 0), Handler) as server:
+        sample = {'count': 1, 'total': 1, 'rows': [{'title': 'Example agent', 'project': 'Demo', 'status': 'Working'}]}
+        with tempfile.TemporaryDirectory() as temp, Server(('127.0.0.1', 0), Handler, reader=lambda: sample.copy(), interval=.025, wait=.3, initial_wait=.3) as server:
             state = Path(temp)
             pairing = create_pairing(state, '127.0.0.1', server.server_port)
             self.assertEqual(pairing, create_pairing(state, '127.0.0.1', server.server_port))
@@ -34,17 +35,31 @@ class PairingTests(unittest.TestCase):
             trust = ssl.create_default_context(cafile=str(state / 'cert.pem'))
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
-            sample = {'count': 1, 'total': 1, 'rows': [{'title': 'Example agent', 'project': 'Demo', 'status': 'Working'}]}
             try:
-                with patch('bridge.snapshot', return_value=sample):
-                    req = urllib.request.Request(pairing['url'], headers={'Authorization': server.authorization})
-                    with urllib.request.urlopen(req, context=trust, timeout=3) as response:
-                        self.assertEqual(json.load(response), sample)
-                    with self.assertRaises(urllib.error.HTTPError) as unauthorized:
-                        urllib.request.urlopen(pairing['url'], context=trust, timeout=3)
-                    self.assertEqual(unauthorized.exception.code, 401)
-                    with self.assertRaises(urllib.error.URLError):
-                        urllib.request.urlopen(req, timeout=3)
+                headers = {'Authorization': server.authorization, 'X-T3-Feed-Version': '2'}
+                req = urllib.request.Request(pairing['url'], headers=headers)
+                with urllib.request.urlopen(req, context=trust, timeout=3) as response:
+                    self.assertEqual(json.load(response), sample)
+                    revision = response.headers['X-T3-Revision']
+                    self.assertGreaterEqual(int(response.headers['X-T3-Age-Ms']), 0)
+                self.assertTrue(revision)
+                sample['count'] = 2
+                changed = urllib.request.Request(pairing['url'], headers={**headers, 'X-T3-Revision': revision})
+                with urllib.request.urlopen(changed, context=trust, timeout=3) as response:
+                    self.assertEqual(json.load(response)['count'], 2)
+                    self.assertNotEqual(response.headers['X-T3-Revision'], revision)
+                    revision = response.headers['X-T3-Revision']
+                heartbeat = urllib.request.Request(pairing['url'], headers={**headers, 'X-T3-Revision': revision})
+                started = time.monotonic()
+                with urllib.request.urlopen(heartbeat, context=trust, timeout=3) as response:
+                    self.assertEqual(response.headers['X-T3-Revision'], revision)
+                    self.assertEqual(json.load(response)['count'], 2)
+                self.assertGreaterEqual(time.monotonic() - started, .25)
+                with self.assertRaises(urllib.error.HTTPError) as unauthorized:
+                    urllib.request.urlopen(pairing['url'], context=trust, timeout=3)
+                self.assertEqual(unauthorized.exception.code, 401)
+                with self.assertRaises(urllib.error.URLError):
+                    urllib.request.urlopen(req, timeout=3)
             finally:
                 server.shutdown()
                 thread.join()
