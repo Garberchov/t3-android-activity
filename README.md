@@ -26,7 +26,7 @@ The glass lock-screen mode uses a live wallpaper with larger typography, aligned
    The installer detects your private Wi-Fi address, creates a unique certificate and token and starts a login LaunchAgent. It prints the location of your **private** `pairing.json`.
 3. Transfer that file locally to the phone (USB file transfer or your preferred trusted local file-transfer method). Open **T3 Activity → Import Mac pairing file** and select it. Tap **Test connection**. Delete the transferred copy after importing. Don't post or share the pairing file.
 4. Optional: tap **Choose wallpaper image** to import your own background. The app otherwise uses a dark solid background. Tap **Set glass lock screen** and allow notifications, then choose **Lock screen only** in Android's wallpaper picker. Your original wallpaper is not overwritten as a file, but this replaces the selected lock-screen wallpaper. If your phone lacks a lock-only choice, consider the notification mode instead.
-5. Lock your phone. The card updates roughly every 15 seconds while its foreground monitor runs.
+5. In Android’s lock-screen settings, choose a compact/small clock (disable the large or dynamic clock if it overlaps the card). On Pixel, compact notification view also helps prevent notification cards overlapping it. Lock your phone. The card updates roughly every 15 seconds while its foreground monitor runs.
 
 No USB debugging, root, server account, or T3 account credentials are required.
 
