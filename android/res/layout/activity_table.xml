@@ -1,0 +1,11 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/card" android:layout_width="match_parent" android:layout_height="wrap_content"
+    android:orientation="vertical" android:paddingStart="4dp" android:paddingEnd="4dp" android:paddingTop="2dp" android:paddingBottom="2dp">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="20dp" android:orientation="horizontal" android:gravity="center_vertical">
+        <TextView android:id="@+id/mark" android:layout_width="wrap_content" android:layout_height="match_parent" android:gravity="center_vertical" android:includeFontPadding="false" android:fontFamily="sans-serif-black" android:text="T3" android:textSize="14sp" android:textColor="@color/card_primary" />
+        <TextView android:id="@+id/summary" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:gravity="center" android:includeFontPadding="false" android:fontFamily="sans-serif-medium" android:textSize="13sp" android:textColor="@color/card_primary" />
+        <TextView android:id="@+id/overflow" android:layout_width="36dp" android:layout_height="match_parent" android:gravity="end|center_vertical" android:includeFontPadding="false" android:textSize="11sp" android:textColor="@color/card_secondary" />
+    </LinearLayout>
+    <LinearLayout android:id="@+id/rows" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" />
+    <TextView android:id="@+id/empty" android:layout_width="match_parent" android:layout_height="wrap_content" android:paddingTop="3dp" android:includeFontPadding="false" android:textSize="12sp" android:textColor="@color/card_secondary" android:visibility="gone" />
+</LinearLayout>

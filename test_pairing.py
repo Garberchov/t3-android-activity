@@ -1,0 +1,55 @@
+import json
+import ssl
+import tempfile
+import threading
+import unittest
+import urllib.error
+import urllib.request
+from pathlib import Path
+from unittest.mock import patch
+
+from bridge import Handler, Server
+from setup_mac import create_pairing, private_ipv4
+
+
+class PairingTests(unittest.TestCase):
+    def test_private_lan_validation(self):
+        self.assertEqual(private_ipv4('192.168.1.10'), '192.168.1.10')
+        for address in ('0.0.0.0', '127.0.0.1', '8.8.8.8', '1.2.3.4\nCN=bad'):
+            with self.assertRaises(ValueError):
+                private_ipv4(address)
+
+    def test_authenticated_tls_and_rotation(self):
+        with tempfile.TemporaryDirectory() as temp, Server(('127.0.0.1', 0), Handler) as server:
+            state = Path(temp)
+            pairing = create_pairing(state, '127.0.0.1', server.server_port)
+            self.assertEqual(pairing, create_pairing(state, '127.0.0.1', server.server_port))
+            self.assertEqual((state / 'pairing.json').stat().st_mode & 0o777, 0o600)
+            self.assertEqual((state / 'key.pem').stat().st_mode & 0o777, 0o600)
+            self.assertNotIn('PRIVATE KEY', pairing['certificate'])
+            tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            tls.load_cert_chain(state / 'cert.pem', state / 'key.pem')
+            server.tls = tls
+            server.authorization = 'Bearer ' + pairing['token']
+            trust = ssl.create_default_context(cafile=str(state / 'cert.pem'))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            sample = {'count': 1, 'total': 1, 'rows': [{'title': 'Example agent', 'project': 'Demo', 'status': 'Working'}]}
+            try:
+                with patch('bridge.snapshot', return_value=sample):
+                    req = urllib.request.Request(pairing['url'], headers={'Authorization': server.authorization})
+                    with urllib.request.urlopen(req, context=trust, timeout=3) as response:
+                        self.assertEqual(json.load(response), sample)
+                    with self.assertRaises(urllib.error.HTTPError) as unauthorized:
+                        urllib.request.urlopen(pairing['url'], context=trust, timeout=3)
+                    self.assertEqual(unauthorized.exception.code, 401)
+                    with self.assertRaises(urllib.error.URLError):
+                        urllib.request.urlopen(req, timeout=3)
+            finally:
+                server.shutdown()
+                thread.join()
+            self.assertNotEqual(create_pairing(state, '127.0.0.1', server.server_port, True)['token'], pairing['token'])
+
+
+if __name__ == '__main__':
+    unittest.main()

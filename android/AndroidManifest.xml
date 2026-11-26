@@ -1,0 +1,28 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.t3activity.companion" android:versionCode="1" android:versionName="0.1.0">
+  <uses-sdk android:minSdkVersion="36" android:targetSdkVersion="36" />
+  <uses-permission android:name="android.permission.INTERNET" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+  <queries><package android:name="com.t3tools.t3code" /><package android:name="com.t3tools.t3code.preview" /></queries>
+  <application android:label="T3 Activity" android:icon="@drawable/ic_launcher" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:allowBackup="false" android:debuggable="false">
+    <activity android:name=".MainActivity" android:exported="true">
+      <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+    </activity>
+    <receiver android:name=".ResumeMonitoringReceiver" android:exported="false">
+      <intent-filter><action android:name="android.intent.action.MY_PACKAGE_REPLACED" /></intent-filter>
+    </receiver>
+    <receiver android:name=".ActivityWidget" android:label="T3 Agent Activity" android:exported="false">
+      <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+      <meta-data android:name="android.appwidget.provider" android:resource="@xml/activity_widget_info" />
+    </receiver>
+    <service android:name=".ActivityWallpaperService" android:label="T3 Glass" android:permission="android.permission.BIND_WALLPAPER" android:exported="true">
+      <intent-filter><action android:name="android.service.wallpaper.WallpaperService" /></intent-filter>
+      <meta-data android:name="android.service.wallpaper" android:resource="@xml/activity_wallpaper" />
+    </service>
+    <service android:name=".ActivityService" android:exported="false" android:foregroundServiceType="specialUse">
+      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="User-started monitoring of active coding agents on their own computer, with an ongoing lock-screen status card and stop action." />
+    </service>
+  </application>
+</manifest>

@@ -1,0 +1,13 @@
+build/
+__pycache__/
+*.apk
+*.idsig
+*.pem
+*.p12
+*.jks
+*.keystore
+pairing.json
+host.json
+config.json
+.env*
+.DS_Store
