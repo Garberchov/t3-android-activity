@@ -76,8 +76,14 @@ public class ActivityService extends Service {
         synchronized (screenGate) {
             long deadline = SystemClock.elapsedRealtime() + delayMs;
             while (!stopped) {
+                // Reconcile delayed/missed broadcasts with the actual display state.
+                boolean awake = getSystemService(PowerManager.class).isInteractive();
+                if (awake != interactive) {
+                    interactive = awake;
+                    if (awake) screenEpoch++;
+                }
                 if (!interactive && glassMode()) {
-                    screenGate.wait();
+                    screenGate.wait(4000);
                     continue;
                 }
                 long remaining = deadline - SystemClock.elapsedRealtime();
@@ -218,7 +224,7 @@ public class ActivityService extends Service {
                 .setSmallIcon(R.drawable.t3_notification_mark).setContentTitle("T3 Glass")
                 .setContentText("Lock-screen activity is updating").setContentIntent(manage)
                 .setOnlyAlertOnce(true).setOngoing(true).setShowWhen(false)
-                .setVisibility(Notification.VISIBILITY_SECRET).setDeleteIntent(stop).build();
+                .setVisibility(Notification.VISIBILITY_SECRET).build();
         }
         boolean custom = ActivityCard.CUSTOM.equals(mode);
         Bundle extras = new Bundle(); extras.putBoolean("android.requestPromotedOngoing", !custom && rows.length() > 0);

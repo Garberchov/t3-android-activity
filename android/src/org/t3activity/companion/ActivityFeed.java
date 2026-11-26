@@ -15,8 +15,8 @@ import javax.net.ssl.*;
 
 final class ActivityFeed {
     static volatile boolean monitoring;
-    private static JSONObject snapshot;
-    private static long refreshed;
+    private static volatile JSONObject snapshot;
+    private static volatile long refreshed;
     static boolean connected, attempted;
     static final CopyOnWriteArrayList<Runnable> listeners = new CopyOnWriteArrayList<>();
     private static final long MAX_AGE = 30_000;
@@ -38,6 +38,9 @@ final class ActivityFeed {
     static void heartbeat(long ageMs) {
         if (snapshot == null) return;
         publish(snapshot, ageMs);
+    }
+    static boolean wallpaperBehind() {
+        return !monitoring || snapshot == null || SystemClock.elapsedRealtime() - refreshed > 12_000;
     }
     static boolean needsRefresh() {
         return !connected || current() == null || SystemClock.elapsedRealtime() - refreshed > 8_000;

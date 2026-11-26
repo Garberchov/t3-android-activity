@@ -41,15 +41,15 @@ public class ActivityWallpaperService extends WallpaperService {
             worker.scheduleWithFixedDelay(this::fetch, 0, 4, TimeUnit.SECONDS);
         }
         @Override public void onSurfaceChanged(SurfaceHolder holder, int format, int width, int height) {
-            surfaceWidth = width; surfaceHeight = height; surfaceReady = true; lastDraw = null; draw();
+            surfaceWidth = width; surfaceHeight = height; surfaceReady = true; lastDraw = null; draw(true);
         }
-        @Override public void onSurfaceRedrawNeeded(SurfaceHolder holder) { lastDraw = null; draw(); }
+        @Override public void onSurfaceRedrawNeeded(SurfaceHolder holder) { lastDraw = null; draw(true); }
         @Override public void onSurfaceDestroyed(SurfaceHolder holder) { surfaceReady = false; super.onSurfaceDestroyed(holder); }
         @Override public void onVisibilityChanged(boolean shown) {
             visible = shown;
-            if (shown) { lastDraw = null; draw(); worker.execute(this::fetch); }
+            if (shown) { lastDraw = null; draw(true); worker.execute(this::fetch); }
         }
-        @Override public void onWallpaperFlagsChanged(int flags) { lastDraw = null; draw(); }
+        @Override public void onWallpaperFlagsChanged(int flags) { lastDraw = null; draw(true); }
         private boolean lockSurface() {
             if (isPreview()) return true;
             int flags = getWallpaperFlags();
@@ -58,12 +58,20 @@ public class ActivityWallpaperService extends WallpaperService {
             return getSystemService(KeyguardManager.class).isKeyguardLocked();
         }
         private void fetch() {
-            if (!visible || !getSystemService(android.os.PowerManager.class).isInteractive() || ActivityFeed.monitoring || !enabled()) return;
+            if (!getSystemService(android.os.PowerManager.class).isInteractive()
+                    || (!visible && !getSystemService(KeyguardManager.class).isKeyguardLocked())
+                    || !ActivityFeed.wallpaperBehind() || !enabled()) return;
             ActivityFeed.Response data = null;
             try { data = new ActivityFeed.Client(ActivityWallpaperService.this).read(null, true); } catch (Exception ignored) { }
             ActivityFeed.Response result = data;
             main.post(() -> {
-                if (!destroyed && visible && !ActivityFeed.monitoring && enabled()) ActivityFeed.publish(result == null ? null : result.data, result == null ? 0 : result.ageMs);
+                if (!destroyed && getSystemService(android.os.PowerManager.class).isInteractive()
+                        && (visible || getSystemService(KeyguardManager.class).isKeyguardLocked())
+                        && ActivityFeed.wallpaperBehind() && enabled()) {
+                    if (result != null || !ActivityFeed.monitoring) {
+                        ActivityFeed.publish(result == null ? null : result.data, result == null ? 0 : result.ageMs);
+                    }
+                }
             });
         }
         private boolean enabled() {
@@ -81,9 +89,10 @@ public class ActivityWallpaperService extends WallpaperService {
             catch (Exception ignored) { }
             lastDraw = null;
         }
-        private void draw() {
+        private void draw() { draw(false); }
+        private void draw(boolean lifecycle) {
             if (!surfaceReady || destroyed || surfaceWidth <= 0 || surfaceHeight <= 0) return;
-            if (!isPreview() && !getSystemService(android.os.PowerManager.class).isInteractive()) return;
+            if (!lifecycle && !isPreview() && !getSystemService(android.os.PowerManager.class).isInteractive()) return;
             reloadImage();
             boolean lock = lockSurface() && enabled();
             JSONObject data = ActivityFeed.current();
@@ -105,7 +114,7 @@ public class ActivityWallpaperService extends WallpaperService {
                 paint.setAlpha(255);
                 canvas.drawColor(0xff111416);
                 if (background != null) canvas.drawBitmap(background, null, picture, paint);
-                if (lock && (rows.length() > 0 || data == null)) {
+                if (lock) {
                     int shown = Math.min(5, rows.length());
                     float left = 32 * scale, right = w - left;
                     // Keep the card clear of the lower-screen fingerprint and shortcut controls.
@@ -160,7 +169,7 @@ public class ActivityWallpaperService extends WallpaperService {
             paint.setColor(0x34bfced6);
             canvas.drawRect(l, card.top + 77 * scale, r, card.top + 78.5f * scale, paint);
             if (shown == 0) {
-                center(canvas, "Waiting for your Mac", card.centerX(), card.top + 119 * scale, 32 * scale, 0xffb5bec3, false);
+                center(canvas, "All caught up".equals(state) ? "No active agents" : "Waiting for your Mac", card.centerX(), card.top + 119 * scale, 32 * scale, 0xffb5bec3, false);
                 return;
             }
             float projectX = r - 264 * scale;
