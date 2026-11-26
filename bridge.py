@@ -124,7 +124,8 @@ class SnapshotReader:
         try:
             version = self.connection.execute('PRAGMA data_version').fetchone()[0]
             # Periodic reads also expire recently completed threads without new DB writes.
-            if self.data is None or version != self.version or time.monotonic() - self.last_read >= 5:
+            terminal = self.data is not None and self.data['total'] > self.data['count']
+            if self.data is None or version != self.version or (terminal and time.monotonic() - self.last_read >= 5):
                 self.data = snapshot(self.db, self.connection)
                 self.version = version
                 self.last_read = time.monotonic()
@@ -137,12 +138,14 @@ class SnapshotReader:
 class ActivityCache:
     """Refresh independently of HTTP so slow database reads never block a fresh response."""
 
-    def __init__(self, reader, interval=2, wait=8, max_age=12, initial_wait=15):
+    def __init__(self, reader, interval=2, wait=8, max_age=12, initial_wait=15, standby_interval=8, wake_budget=1.25):
         self.reader = reader
         self.interval, self.wait, self.max_age = interval, wait, max_age
         self.initial_wait = max(wait, initial_wait)
+        self.standby_interval, self.wake_budget = standby_interval, wake_budget
         self.condition = threading.Condition()
         self.body = self.revision = None
+        self.active_count = 0
         self.refreshed = self.demand = 0
         self.closed = False
         self.worker = threading.Thread(target=self.refresh, daemon=True)
@@ -158,36 +161,46 @@ class ActivityCache:
     def refresh_loop(self):
         while True:
             with self.condition:
-                while not self.closed and time.monotonic() - self.demand > 30:
-                    self.condition.wait()
                 if self.closed:
                     return
             try:
-                data = json.dumps(self.reader(), ensure_ascii=False).encode()
+                snapshot_data = self.reader()
+                data = json.dumps(snapshot_data, ensure_ascii=False).encode()
                 revision = hashlib.sha256(data).hexdigest()
             except (sqlite3.Error, OSError):
                 pass
             else:
                 with self.condition:
                     self.body, self.revision = data, revision
+                    self.active_count = snapshot_data.get('count', 0)
                     self.refreshed = time.monotonic()
                     self.condition.notify_all()
             with self.condition:
-                self.condition.wait_for(lambda: self.closed, timeout=self.interval)
+                # Keep a warm snapshot ready on the Mac, but slow the work
+                # when no phone is actively requesting updates.
+                idle = time.monotonic() - self.demand > max(12, 2 * self.wait)
+                interval = self.standby_interval if idle and not self.active_count else self.interval
+                self.condition.wait_for(
+                    lambda: self.closed or (idle and time.monotonic() - self.demand <= max(12, 2 * self.wait)),
+                    timeout=interval)
                 if self.closed:
                     return
 
-    def read(self, since=None, allow_stale=False):
+    def read(self, since=None, allow_stale=False, prefer_fresh=False):
         with self.condition:
             self.demand = time.monotonic()
             self.condition.notify_all()
-            initial = self.body is None or self.demand - self.refreshed > self.max_age
-            deadline = self.demand + (self.initial_wait if initial else self.wait)
+            freshness = self.interval + .5 if prefer_fresh else self.max_age
+            initial = self.body is None or self.demand - self.refreshed > freshness
+            limit = self.initial_wait if initial else self.wait
+            if prefer_fresh and self.body is not None and self.demand - self.refreshed <= 30:
+                limit = min(limit, self.wake_budget)
+            deadline = self.demand + limit
             while not self.closed:
                 now = time.monotonic()
                 age = now - self.refreshed
-                fresh = self.body is not None and age <= self.max_age
-                if fresh and (since != self.revision or now >= deadline):
+                fresh = self.body is not None and age <= freshness
+                if fresh and (prefer_fresh or since != self.revision or now >= deadline):
                     return self.body, self.revision, int(age * 1000)
                 if now >= deadline:
                     # A new client understands source age and can show "Syncing"
@@ -227,6 +240,7 @@ class Server(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
     def log_message(self, *_):
         pass
 
@@ -238,18 +252,23 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         try:
+            version = self.headers.get('X-T3-Feed-Version')
+            since = self.headers.get('X-T3-Revision')
             data, revision, age_ms = self.server.cache.read(
-                self.headers.get('X-T3-Revision'), self.headers.get('X-T3-Feed-Version') == '2')
+                since, version in ('2', '3'), self.headers.get('X-T3-Fresh') == '1')
         except sqlite3.Error:
             self.send_error(503)
             return
-        self.send_response(200)
+        unchanged = version == '3' and since == revision
+        self.send_response(204 if unchanged else 200)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-T3-Revision', revision)
         self.send_header('X-T3-Age-Ms', str(age_ms))
-        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Content-Length', str(0 if unchanged else len(data)))
         self.end_headers()
+        if unchanged:
+            return
         try:
             self.wfile.write(data)
         except OSError:

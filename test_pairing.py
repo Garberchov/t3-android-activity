@@ -1,4 +1,5 @@
 import json
+import http.client
 import ssl
 import tempfile
 import threading
@@ -55,6 +56,29 @@ class PairingTests(unittest.TestCase):
                     self.assertEqual(response.headers['X-T3-Revision'], revision)
                     self.assertEqual(json.load(response)['count'], 2)
                 self.assertGreaterEqual(time.monotonic() - started, .25)
+                # v3 keeps the authenticated TLS socket and sends a bodyless heartbeat.
+                conn = http.client.HTTPSConnection('127.0.0.1', server.server_port, context=trust, timeout=3)
+                try:
+                    headers3 = {**headers, 'X-T3-Feed-Version': '3'}
+                    conn.request('GET', '/activity', headers=headers3)
+                    response = conn.getresponse()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(json.loads(response.read())['count'], 2)
+                    revision = response.getheader('X-T3-Revision')
+                    socket = conn.sock
+                    conn.request('GET', '/activity', headers={**headers3, 'X-T3-Revision': revision})
+                    response = conn.getresponse()
+                    self.assertEqual(response.status, 204)
+                    self.assertEqual(response.read(), b'')
+                    self.assertIs(conn.sock, socket)
+                    sample['count'] = 3
+                    conn.request('GET', '/activity', headers={**headers3, 'X-T3-Revision': revision})
+                    response = conn.getresponse()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(json.loads(response.read())['count'], 3)
+                    self.assertIs(conn.sock, socket)
+                finally:
+                    conn.close()
                 with self.assertRaises(urllib.error.HTTPError) as unauthorized:
                     urllib.request.urlopen(pairing['url'], context=trust, timeout=3)
                 self.assertEqual(unauthorized.exception.code, 401)

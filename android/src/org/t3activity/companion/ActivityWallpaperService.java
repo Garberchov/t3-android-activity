@@ -58,9 +58,9 @@ public class ActivityWallpaperService extends WallpaperService {
             return getSystemService(KeyguardManager.class).isKeyguardLocked();
         }
         private void fetch() {
-            if (!visible || ActivityFeed.monitoring || !enabled()) return;
+            if (!visible || !getSystemService(android.os.PowerManager.class).isInteractive() || ActivityFeed.monitoring || !enabled()) return;
             ActivityFeed.Response data = null;
-            try { data = new ActivityFeed.Client(ActivityWallpaperService.this).read(null); } catch (Exception ignored) { }
+            try { data = new ActivityFeed.Client(ActivityWallpaperService.this).read(null, true); } catch (Exception ignored) { }
             ActivityFeed.Response result = data;
             main.post(() -> {
                 if (!destroyed && visible && !ActivityFeed.monitoring && enabled()) ActivityFeed.publish(result == null ? null : result.data, result == null ? 0 : result.ageMs);
@@ -83,6 +83,7 @@ public class ActivityWallpaperService extends WallpaperService {
         }
         private void draw() {
             if (!surfaceReady || destroyed || surfaceWidth <= 0 || surfaceHeight <= 0) return;
+            if (!isPreview() && !getSystemService(android.os.PowerManager.class).isInteractive()) return;
             reloadImage();
             boolean lock = lockSurface() && enabled();
             JSONObject data = ActivityFeed.current();

@@ -54,5 +54,31 @@ class CacheTests(unittest.TestCase):
             cache.close()
 
 
+    def test_wake_budget_returns_explicitly_aged_snapshot(self):
+        block = threading.Event()
+        release = threading.Event()
+        entered = threading.Event()
+        def reader():
+            if block.is_set():
+                entered.set()
+                release.wait(1)
+            return {'count': 1}
+        cache = ActivityCache(reader, interval=.025, wait=.5, max_age=.15, initial_wait=.5, standby_interval=.025, wake_budget=.08)
+        try:
+            body, revision, _ = cache.read()
+            block.set()
+            self.assertTrue(entered.wait(.5))
+            with cache.condition:
+                cache.refreshed = time.monotonic() - 5
+            start = time.monotonic()
+            stale, _, age = cache.read(allow_stale=True, prefer_fresh=True)
+            self.assertEqual(stale, body)
+            self.assertGreaterEqual(age, 5000)
+            self.assertLess(time.monotonic() - start, .3)
+        finally:
+            release.set()
+            cache.close()
+
+
 if __name__ == '__main__':
     unittest.main()

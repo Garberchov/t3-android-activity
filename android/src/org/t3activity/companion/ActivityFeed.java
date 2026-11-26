@@ -35,6 +35,10 @@ final class ActivityFeed {
     static JSONObject current() {
         return snapshot != null && SystemClock.elapsedRealtime() - refreshed < MAX_AGE ? snapshot : null;
     }
+    static void heartbeat(long ageMs) {
+        if (snapshot == null) return;
+        publish(snapshot, ageMs);
+    }
     static boolean needsRefresh() {
         return !connected || current() == null || SystemClock.elapsedRealtime() - refreshed > 8_000;
     }
@@ -121,24 +125,36 @@ final class ActivityFeed {
             SSLContext tls = SSLContext.getInstance("TLS"); tls.init(null, tm.getTrustManagers(), null);
             socketFactory = tls.getSocketFactory();
         }
-        Response read(String since) throws Exception {
+        Response read(String since) throws Exception { return read(since, false); }
+        Response read(String since, boolean fresh) throws Exception {
             HttpsURLConnection connection = (HttpsURLConnection) url.openConnection();
             connection.setSSLSocketFactory(socketFactory);
             connection.setInstanceFollowRedirects(false);
+            connection.setUseCaches(false);
             connection.setRequestProperty("Authorization", authorization);
-            connection.setRequestProperty("X-T3-Feed-Version", "2");
+            connection.setRequestProperty("X-T3-Feed-Version", "3");
+            if (fresh) connection.setRequestProperty("X-T3-Fresh", "1");
             if (since != null) connection.setRequestProperty("X-T3-Revision", since);
             connection.setConnectTimeout(5000); connection.setReadTimeout(18000);
+            boolean complete = false;
             try {
                 int code = connection.getResponseCode();
-                if (code != 200) throw new java.io.IOException("HTTP " + code);
+                if (code != 200 && code != 204) throw new IOException("HTTP " + code);
+                String age = connection.getHeaderField("X-T3-Age-Ms");
+                String revision = connection.getHeaderField("X-T3-Revision");
+                long ageMs = age == null ? 0 : Long.parseLong(age);
+                JSONObject data = null;
                 try (InputStream stream = connection.getInputStream()) {
-                    JSONObject data = new JSONObject(new String(boundedRead(stream, 128 * 1024), StandardCharsets.UTF_8));
-                    data.getInt("count"); data.getJSONArray("rows");
-                    String age = connection.getHeaderField("X-T3-Age-Ms");
-                    return new Response(data, connection.getHeaderField("X-T3-Revision"), age == null ? 0 : Long.parseLong(age));
+                    if (code == 200) {
+                        data = new JSONObject(new String(boundedRead(stream, 128 * 1024), StandardCharsets.UTF_8));
+                        data.getInt("count"); data.getJSONArray("rows");
+                    }
                 }
-            } finally { connection.disconnect(); }
+                complete = true;
+                return new Response(data, revision, ageMs);
+            } finally {
+                if (!complete) connection.disconnect();
+            }
         }
     }
 

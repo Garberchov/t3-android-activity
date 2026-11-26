@@ -26,13 +26,17 @@ The glass lock-screen mode uses a live wallpaper with larger typography, aligned
    The installer detects your private Wi-Fi address, creates a unique certificate and token and starts a login LaunchAgent. It prints the location of your **private** `pairing.json`.
 3. Transfer that file locally to the phone (USB file transfer or your preferred trusted local file-transfer method). Open **T3 Activity → Import Mac pairing file** and select it. Tap **Test connection**. Delete the transferred copy after importing. Don't post or share the pairing file.
 4. Optional: tap **Choose wallpaper image** to import your own background. The app otherwise uses a dark solid background. Tap **Set glass lock screen** and allow notifications, then choose **Lock screen only** in Android's wallpaper picker. Your original wallpaper is not overwritten as a file, but this replaces the selected lock-screen wallpaper. If your phone lacks a lock-only choice, consider the notification mode instead.
-5. In Android’s lock-screen settings, choose a compact/small clock (disable the large or dynamic clock if it overlaps the card). On Pixel, compact notification view also helps prevent notification cards overlapping it. Lock your phone. The Mac samples activity about every two seconds and sends the phone changed snapshots immediately. The app keeps an eight-second heartbeat when nothing changes, automatically reconnects, refreshes immediately on screen wake if the connection is stale, and marks last-known activity as reconnecting during short outages. If SQLite itself is slow, the card shows Syncing rather than claiming the Mac disconnected.
+5. In Android’s lock-screen settings, choose a compact/small clock (disable the large or dynamic clock if it overlaps the card). On Pixel, compact notification view also helps prevent notification cards overlapping it. Lock your phone. While the screen is awake, the Mac samples activity about every two seconds and sends changed snapshots immediately. In glass mode, the phone pauses network and rendering work while the display is off, then requests fresh data immediately when it wakes. Native notification modes retain slower (roughly 30-second) background updates. The Mac keeps active agent data warm at two seconds, slowing to eight seconds when no agents are running and the phone is asleep. The app keeps an eight-second heartbeat when nothing changes, automatically reconnects, refreshes immediately on screen wake if the connection is stale, and marks last-known activity as reconnecting during short outages. If SQLite itself is slow, the card shows Syncing rather than claiming the Mac disconnected.
 
 No USB debugging, root, server account, or T3 account credentials are required.
 
-## Updating from v0.1.0
+## Updating from an earlier release
 
-Install the new APK over the old one, then run `python3 setup_mac.py` from the updated repository on your Mac. Existing pairings are retained if the Mac address and port are unchanged. Both sides should be updated to get the fast change-driven feed.
+Install the new APK over the old one, then run `python3 setup_mac.py` from the updated repository on your Mac. Existing pairings are retained if the Mac address and port are unchanged. Both sides should be updated to get the fast change-driven feed, connection reuse, and battery-aware scheduling.
+
+## Battery and responsiveness
+
+Glass mode sleeps with the display and resumes instantly on wake. In a measured Pixel 8a run, screen-off companion CPU time fell from 2.75 seconds to 0.03 seconds per minute, with no feed requests during the optimized window. See the [benchmark results and reproduction scripts](benchmarks/README.md) for details and measurement limitations.
 
 ## Other display modes
 

@@ -1,0 +1,72 @@
+{
+  "device": "Pixel 8a, Android 16, connected and charging, glass mode",
+  "baseline": {
+    "label": "baseline_screen_off",
+    "seconds": 61.33,
+    "cpu_ms": 2750.0,
+    "bytes": 81396,
+    "packets": 431,
+    "requests": 21,
+    "errors": 0
+  },
+  "optimized": {
+    "label": "final_screen_off",
+    "seconds": 61.12,
+    "cpu_ms": 30.0,
+    "bytes": 120,
+    "packets": 3,
+    "requests": 0,
+    "errors": 0
+  },
+  "wake_trials": [
+    {
+      "first": {
+        "latency_ms": 1037,
+        "request_ms": 971,
+        "source_age_ms": 0
+      },
+      "fresh": {
+        "latency_ms": 1037,
+        "request_ms": 971,
+        "source_age_ms": 0
+      }
+    },
+    {
+      "first": {
+        "latency_ms": 1617,
+        "request_ms": 1579,
+        "source_age_ms": 10849
+      },
+      "fresh": {
+        "latency_ms": 3481,
+        "request_ms": 539,
+        "source_age_ms": 0
+      }
+    },
+    {
+      "first": {
+        "latency_ms": 1130,
+        "request_ms": 1102,
+        "source_age_ms": 0
+      },
+      "fresh": {
+        "latency_ms": 1130,
+        "request_ms": 1102,
+        "source_age_ms": 0
+      }
+    },
+    {
+      "first": {
+        "latency_ms": 1553,
+        "request_ms": 1537,
+        "source_age_ms": 7343
+      },
+      "fresh": {
+        "latency_ms": 2016,
+        "request_ms": 462,
+        "source_age_ms": 0
+      }
+    }
+  ],
+  "mac_cpu_seconds": 2.54
+}

@@ -20,56 +20,114 @@ public class ActivityService extends Service {
     private static final String GLASS_CHANNEL = "glass_monitor";
     private ExecutorService worker, wakeWorker;
     private boolean wakeInFlight;
-    private final BroadcastReceiver screenOn = new BroadcastReceiver() {
-        @Override public void onReceive(Context context, Intent intent) { refreshAfterWake(); }
+    private final Object screenGate = new Object();
+    private boolean interactive, requestInFlight;
+    private int screenEpoch;
+    private final BroadcastReceiver screenState = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            boolean on = Intent.ACTION_SCREEN_ON.equals(intent.getAction());
+            boolean needsParallelFetch;
+            synchronized (screenGate) {
+                interactive = on;
+                if (on) screenEpoch++;
+                needsParallelFetch = on && requestInFlight;
+                screenGate.notifyAll();
+            }
+            if (on) {
+                android.util.Log.d("T3Activity", "screen wake");
+                for (Runnable listener : ActivityFeed.listeners) listener.run();
+                if (needsParallelFetch) refreshAfterWake();
+            }
+        }
     };
-    private String last;
-    private boolean stopped;
+    private String last, lastNotificationMode;
+    private volatile boolean stopped;
     private final Handler main = new Handler(Looper.getMainLooper());
 
     @Override public IBinder onBind(Intent intent) { return null; }
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && "stop".equals(intent.getAction())) { deleteFile("monitoring.enabled"); stopSelf(); return START_NOT_STICKY; }
-        if (worker != null) return START_STICKY;
+        if (worker != null) {
+            synchronized (screenGate) { screenEpoch++; screenGate.notifyAll(); }
+            return START_STICKY;
+        }
         NotificationManager manager = getSystemService(NotificationManager.class);
         manager.createNotificationChannel(new NotificationChannel(CHANNEL, "Agent activity", NotificationManager.IMPORTANCE_LOW));
         NotificationChannel glass = new NotificationChannel(GLASS_CHANNEL, "T3 Glass monitor", NotificationManager.IMPORTANCE_LOW);
         glass.setLockscreenVisibility(Notification.VISIBILITY_SECRET);
         manager.createNotificationChannel(glass);
         ActivityFeed.monitoring = true;
-        startForeground(ID, card("Connecting", "Waiting for your Mac", new JSONArray(), 0, 0, ActivityCard.mode(this)), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+        lastNotificationMode = ActivityCard.mode(this);
+        startForeground(ID, card("Connecting", "Waiting for your Mac", new JSONArray(), 0, 0, lastNotificationMode), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+        synchronized (screenGate) { interactive = getSystemService(PowerManager.class).isInteractive(); }
         worker = Executors.newSingleThreadExecutor();
-        worker.execute(this::refreshLoop);
         wakeWorker = Executors.newSingleThreadExecutor();
-        registerReceiver(screenOn, new IntentFilter(Intent.ACTION_SCREEN_ON), Context.RECEIVER_NOT_EXPORTED);
+        IntentFilter filter = new IntentFilter(Intent.ACTION_SCREEN_ON);
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
+        registerReceiver(screenState, filter, Context.RECEIVER_NOT_EXPORTED);
+        worker.execute(this::refreshLoop);
         return START_STICKY;
     }
+    private boolean glassMode() { return ActivityCard.WALLPAPER.equals(ActivityCard.mode(this)); }
+
+    // No traffic while the glass wallpaper is invisible. Native notification
+    // modes retain low-rate background updates; waking always bypasses delays.
+    private int awaitRequest(int previousEpoch, long delayMs) throws InterruptedException {
+        synchronized (screenGate) {
+            long deadline = SystemClock.elapsedRealtime() + delayMs;
+            while (!stopped) {
+                if (!interactive && glassMode()) {
+                    screenGate.wait();
+                    continue;
+                }
+                long remaining = deadline - SystemClock.elapsedRealtime();
+                if (remaining > 0 && previousEpoch == screenEpoch) {
+                    screenGate.wait(remaining);
+                    continue;
+                }
+                requestInFlight = true;
+                return screenEpoch;
+            }
+            throw new InterruptedException();
+        }
+    }
+
     private void refreshLoop() {
         ActivityFeed.Client client = null;
         String revision = null;
-        int retryMs = 1000;
+        int retryMs = 1000, previousEpoch = -1;
+        long delayMs = 0;
+        boolean freshen = false;
         while (!Thread.currentThread().isInterrupted()) {
             try {
-                if (client == null) client = new ActivityFeed.Client(this);
+                int epoch = awaitRequest(previousEpoch, delayMs);
+                boolean fresh = epoch != previousEpoch;
+                previousEpoch = epoch;
+                // Don't reuse a socket pool that may have gone stale while asleep.
+                if (client == null || fresh) client = new ActivityFeed.Client(this);
                 long requestStarted = SystemClock.elapsedRealtime();
-                ActivityFeed.Response response = client.read(revision);
+                ActivityFeed.Response response = client.read(fresh ? null : revision, fresh || freshen);
+                freshen = response.ageMs > 2500;
                 android.util.Log.d("T3Activity", (java.util.Objects.equals(revision, response.revision) ? "heartbeat " : "update ")
-                        + (SystemClock.elapsedRealtime() - requestStarted) + "ms");
+                        + (SystemClock.elapsedRealtime() - requestStarted) + "ms, age " + response.ageMs + "ms");
                 revision = response.revision;
                 retryMs = 1000;
-                main.post(() -> deliver(response.data, response.ageMs));
-                // Older bridges do not support the change stream; avoid a tight loop.
-                if (revision == null) Thread.sleep(3000);
+                main.post(() -> deliver(response));
+                delayMs = revision == null ? 3000 : 0;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
             } catch (Exception e) {
                 android.util.Log.w("T3Activity", "Reconnecting: " + e.getClass().getSimpleName());
-                main.post(() -> deliver(null, 0));
-                client = null; revision = null;
-                try { Thread.sleep(retryMs); }
-                catch (InterruptedException stop) { Thread.currentThread().interrupt(); return; }
+                main.post(() -> deliver(null));
+                client = null; revision = null; freshen = true;
+                delayMs = retryMs;
                 retryMs = Math.min(8000, retryMs * 2);
+            } finally {
+                synchronized (screenGate) {
+                    requestInFlight = false;
+                    if (!interactive && !glassMode()) delayMs = Math.max(delayMs, 30_000);
+                }
             }
         }
     }
@@ -80,21 +138,23 @@ public class ActivityService extends Service {
         wakeInFlight = true;
         wakeWorker.execute(() -> {
             ActivityFeed.Response response = null;
-            try { response = new ActivityFeed.Client(this).read(null); }
+            try { response = new ActivityFeed.Client(this).read(null, true); }
             catch (Exception ignored) { }
             ActivityFeed.Response result = response;
             main.post(() -> {
                 wakeInFlight = false;
                 if (!stopped && result != null && ActivityFeed.needsRefresh()) {
                     android.util.Log.d("T3Activity", "Recovered on screen wake");
-                    deliver(result.data, result.ageMs);
+                    deliver(result);
                 }
             });
         });
     }
-    private void deliver(JSONObject data, long ageMs) {
+    private void deliver(ActivityFeed.Response response) {
         if (stopped) return;
-        ActivityFeed.publish(data, ageMs);
+        if (response == null) ActivityFeed.publish(null);
+        else if (response.data == null) ActivityFeed.heartbeat(response.ageMs);
+        else ActivityFeed.publish(response.data, response.ageMs);
         JSONObject current = ActivityFeed.current();
         int count = current == null ? 0 : current.optInt("count");
         JSONArray rows = current == null ? new JSONArray() : current.optJSONArray("rows");
@@ -144,6 +204,10 @@ public class ActivityService extends Service {
         if (key.equals(last)) return;
         last = key;
         ActivityWidget.update(this, title, empty, rows, total);
+        // The glass monitor is a static, hidden notification. Reposting it on
+        // every activity change needlessly wakes NotificationManager.
+        if (ActivityCard.WALLPAPER.equals(mode) && mode.equals(lastNotificationMode)) return;
+        lastNotificationMode = mode;
         getSystemService(NotificationManager.class).notify(ID, card(title, empty, rows, count, total, mode));
     }
     private Notification card(String title, String empty, JSONArray rows, int count, int total, String mode) {
@@ -180,7 +244,8 @@ public class ActivityService extends Service {
         ActivityFeed.monitoring = false;
         ActivityFeed.clear();
         if (worker != null) {
-            unregisterReceiver(screenOn);
+            unregisterReceiver(screenState);
+            synchronized (screenGate) { screenGate.notifyAll(); }
             worker.shutdownNow();
             wakeWorker.shutdownNow();
         }
